@@ -1,6 +1,6 @@
 # End-to-End Machine Learning Pipeline with Docker for Desktop and Kubeflow
 
-This project is simple example of an automated end-to-end machine learning pipeline using Docker Desktop and Kubeflow
+This project is simple example of an automated end-to-end machine learning pipeline using Docker Desktop and Kubeflow.
 
 ![workflow](argo_workflow.png?raw=true)
 
@@ -14,7 +14,7 @@ This project is simple example of an automated end-to-end machine learning pipel
 
 ### Steps:
 
-#### 1. Install [Kubeflow](https://www.kubeflow.org/):
+#### 1. Install [Kubeflow](https://www.kubeflow.org/)
 
 ```
 export KUBEFLOW_SRC=$(pwd)/kubeflow
@@ -72,7 +72,7 @@ This process will perform the following steps:
 - Split data between training and test datasets
 - Training using Keras
 - Build and push Docker image using [Seldon-Core](https://github.com/SeldonIO/seldon-core/blob/master/docs/wrappers/python-docker.md)
-- Deploy model using with 3 replicas
+- Deploy the model with 3 replicas
 
 ```
 $ argo submit argo_workflow.yaml -p registry="index.docker.io/v1/" -p bucket="bucket-test1" -p bucket-key="hub_stackshare_combined_v2.csv.gz"
@@ -102,7 +102,29 @@ Parameters:
  selected-categories: devops,build-test-deploy,languages & frameworks,data stores,programming languages,application hosting,databases,web servers,application utilities,support-sales-and-marketing,operating systems,monitoring tools,continuous integration,self-hosted blogging / cms,open source service discovery,message queue,frameworks (full stack),in-memory databases,crm,search as a service,log management,monitoring,collaboration,virtual machine platforms & containers,server configuration and automation,big data tools,database tools,machine learning tools,code collaboration & version_control,load balancer / reverse proxy,web cache,java build tools,search engines,container tools,package managers,project management,infrastructure build tools,static site generators,code review,microframeworks (backend),assets and media,version control system,front end package manager,headless browsers,data science notebooks,ecommerce,background processing,cross-platform mobile development,issue tracking,analytics,secrets management,text editor,graph databases,cluster management,exception monitoring,business tools,business intelligence,localhost tools,realtime backend / api,microservices tools,chatops,git tools,hosted package repository,js build tools / js task runners,libraries,platform as a service,general analytics,group chat & notifications,browser testing,serverless / task processing,css pre-processors / extensions,image processing and management,integrated development environment,stream processing,cross-platform desktop development,continuous deployment,machine learning,data science,monitoring metrics,metrics,continuous delivery,build automation
 ```
 
-All the argo workflow parameters can be overwritten via the CLI using the `-p` flag.
+> All the Argo workflow parameters can be overwritten via the CLI using the `-p` flag.
+
+## Repo Layout
+
+```
+.
+├── README.md
+├── argo_workflow.png
+├── argo_workflow.yaml
+└── base
+    ├── Dockerfile
+    ├── Makefile
+    ├── requirements.txt
+    └── src
+        ├── data
+        │   └── hub_stackshare_combined_v2.csv.gz
+        ├── fetch_gihub_data.py
+        ├── models
+        │   ├── DockerHubClassification.py
+        │   └── requirements.txt
+        ├── process_data.py
+        └── train.py
+```
 
 ## Open Source Projects Used
 
