@@ -2,6 +2,8 @@
 
 This project is simple example of an automated end-to-end machine learning pipeline using Docker Desktop and Kubeflow
 
+![workflow](argo_workflow.png?raw=true)
+
 ## Getting started
 
 ### Requirements:
