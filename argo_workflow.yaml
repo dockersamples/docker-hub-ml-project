@@ -1,0 +1,264 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: docker-hub-classification
+spec:
+  entrypoint: default
+
+  # Create a volume for containers to store their output data.
+  volumeClaimTemplates:
+    - metadata:
+        name: workdir
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+
+  # Arguments of the workflows
+  arguments:
+    parameters:
+      # model version
+      - name: model-version
+        value: "v3"
+
+      # number of replicas
+      - name: replicas
+        value: 3
+
+      # The name of the S3 bucket where the data is stored.
+      - name: bucket
+        value: "<bucket-name>"
+
+      # The path to the input data in the S3 bucket, in csv.gz format
+      - name: bucket-key
+        value: <key-path>
+
+      # mount path
+      - name: mount-path
+        value: /mnt/workspace/data
+
+      # loss function
+      - name: loss
+        value: binary_crossentropy
+
+      # Percentage of the dataset used to test the model (e.g. 0.2 == 20%)
+      - name: test-size
+        value: 0.2
+
+      # batch size
+      - name: batch-size
+        value: 100
+
+      # number of epochs
+      - name: epochs
+        value: 15
+
+      # validation split
+      - name: validation-split
+        value: 0.1
+
+      # output train data directory path
+      - name: output-train-csv
+        value: train_data.csv
+
+      # output test data directory path
+      - name: output-test-csv
+        value: test_data.csv
+
+      # output model
+      - name: output-model
+        value: hub_classifier.h5
+
+      # output vectorized descriptions
+      - name: output-vectorized-descriptions
+        value: vectorized_descriptions.pckl
+
+      # output raw data directory path
+      - name: output-raw-csv
+        value: hub_stackshare_combined_v2.csv
+
+      # selected categories
+      - name: selected-categories
+        value: "devops,build-test-deploy,languages & frameworks,data stores,programming languages,application hosting,databases,web servers,application utilities,support-sales-and-marketing,operating systems,monitoring tools,continuous integration,self-hosted blogging / cms,open source service discovery,message queue,frameworks (full stack),in-memory databases,crm,search as a service,log management,monitoring,collaboration,virtual machine platforms & containers,server configuration and automation,big data tools,database tools,machine learning tools,code collaboration & version_control,load balancer / reverse proxy,web cache,java build tools,search engines,container tools,package managers,project management,infrastructure build tools,static site generators,code review,microframeworks (backend),assets and media,version control system,front end package manager,headless browsers,data science notebooks,ecommerce,background processing,cross-platform mobile development,issue tracking,analytics,secrets management,text editor,graph databases,cluster management,exception monitoring,business tools,business intelligence,localhost tools,realtime backend / api,microservices tools,chatops,git tools,hosted package repository,js build tools / js task runners,libraries,platform as a service,general analytics,group chat & notifications,browser testing,serverless / task processing,css pre-processors / extensions,image processing and management,integrated development environment,stream processing,cross-platform desktop development,continuous deployment,machine learning,data science,monitoring metrics,metrics,continuous delivery,build automation"
+
+      #The container image to use in the workflow
+      - name: registry
+        value: "<registry-url>"
+
+      #The container image to use in the workflow
+      - name: image-name
+        value: data-team/base:latest
+
+  templates:
+    ##################################
+    # Define the steps of the workflow
+    ##################################
+    - name: default
+      steps:
+        - - name: import-data
+            template: import-data
+        - - name: process-data
+            template: process-data
+        - - name: training
+            template: training
+        - - name: build-push-image
+            template: build-push-image
+        - - name: deploy-model
+            template: deploy-model
+
+    #################################################
+    # Import / Unzip
+    # Imports the data on the volume and unzips it.
+    #################################################
+    - name: import-data
+      container:
+        image: alpine:latest
+        command: [sh, -c]
+        args:
+          [
+            "gzip -d {{workflow.parameters.mount-path}}/hub_stackshare_combined_v2.csv.gz",
+          ]
+        volumeMounts:
+          - name: workdir
+            mountPath: "{{workflow.parameters.mount-path}}/"
+      inputs:
+        artifacts:
+          - name: input
+            path: "{{workflow.parameters.mount-path}}/hub_stackshare_combined_v2.csv.gz"
+            s3:
+              endpoint: s3.amazonaws.com
+              bucket: "{{workflow.parameters.bucket}}"
+              key: "{{workflow.parameters.bucket-key}}"
+              accessKeySecret:
+                name: s3-credentials
+                key: accessKey
+              secretKeySecret:
+                name: s3-credentials
+                key: secretKey
+      outputs:
+        artifacts:
+          - name: raw-csv
+            path: "{{workflow.parameters.mount-path}}/{{workflow.parameters.output-raw-csv}}"
+
+    #########################################################################
+    # Process Data
+    #########################################################################
+    - name: process-data
+      container:
+        image: "{{workflow.parameters.registry}}{{workflow.parameters.image-name}}"
+        command: [sh, -c]
+        args:
+          [
+            "python /src/process_data.py --mount_path {{workflow.parameters.mount-path}} --input_csv {{workflow.parameters.output-raw-csv}} --output_train_csv {{workflow.parameters.output-train-csv}} --output_test_csv {{workflow.parameters.output-test-csv}} --test_size {{workflow.parameters.test-size}} --selected_categories '{{workflow.parameters.selected-categories}}'",
+          ]
+        volumeMounts:
+          - name: workdir
+            mountPath: "{{workflow.parameters.mount-path}}/"
+      outputs:
+        artifacts:
+          - name: output-train-csv
+            path: "{{workflow.parameters.mount-path}}/{{workflow.parameters.output-train-csv}}"
+          - name: output-test-csv
+            path: "{{workflow.parameters.mount-path}}/{{workflow.parameters.output-test-csv}}"
+          - name: selected-categories
+            path: "{{workflow.parameters.mount-path}}/selected_categories.pckl"
+
+    #######################################
+    # Training and ML model extraction
+    #######################################
+    - name: training
+      container:
+        image: "{{workflow.parameters.registry}}{{workflow.parameters.image-name}}"
+        command: [sh, -c]
+        args:
+          [
+            "python /src/train.py --mount_path {{workflow.parameters.mount-path}} --input_train_csv {{workflow.parameters.output-train-csv}} --input_test_csv {{workflow.parameters.output-test-csv}} --output_model {{workflow.parameters.output-model}} --output_vectorized_descriptions  {{workflow.parameters.output-vectorized-descriptions}};cp /src/models/* {{workflow.parameters.mount-path}}/",
+          ]
+        volumeMounts:
+          - name: workdir
+            mountPath: "{{workflow.parameters.mount-path}}/"
+      outputs:
+        artifacts:
+          - name: output-model
+            path: "{{workflow.parameters.mount-path}}/{{workflow.parameters.output-model}}"
+          - name: output-vectorized-descriptions
+            path: "{{workflow.parameters.mount-path}}/{{workflow.parameters.output-vectorized-descriptions}}"
+
+    #######################################
+    # Build and push a docker image using the Seldon-Core Docker wrapper
+    #######################################
+    - name: build-push-image
+      container:
+        image: docker:17.10
+        command: [sh, -c]
+        args:
+          [
+            "export DOCKER_HOST=tcp://127.0.0.1:2375;cd {{workflow.parameters.mount-path}};sleep 15;rm *.csv;docker run -v {{workflow.parameters.mount-path}}:/model seldonio/core-python-wrapper:0.7 /model DockerHubClassification {{workflow.parameters.model-version}} {{workflow.parameters.registry}}dev --base-image=python:3.6 --image-name=dockerhubclassifier;cd build/;./build_image.sh;./push_image.sh;",
+          ]
+        volumeMounts:
+          - name: workdir
+            mountPath: "{{workflow.parameters.mount-path}}/"
+      env:
+        - name: DOCKER_HOST #the docker daemon can be access on the standard port on localhost
+          value: 127.0.0.1
+        - name: DOCKER_USERNAME # name of env var
+          valueFrom:
+            secretKeyRef:
+              name: docker-credentials # name of an existing k8s secret
+              key: username # 'key' subcomponent of the secret
+        - name: DOCKER_PASSWORD # name of env var
+          valueFrom:
+            secretKeyRef:
+              name: docker-credentials # name of an existing k8s secret
+              key: password # 'key' subcomponent of the secret
+      sidecars:
+        - name: dind
+          image: docker:17.10-dind #Docker already provides an image for running a Docker daemon
+          securityContext:
+            privileged: true #the Docker daemon can only run in a privileged container
+          # mirrorVolumeMounts will mount the same volumes specified in the main container
+          # to the sidecar (including artifacts), at the same mountPaths. This enables
+          # dind daemon to (partially) see the same filesystem as the main container in
+          # order to use features such as docker volume binding.
+          mirrorVolumeMounts: true
+
+    #######################################
+    # Deploy model
+    #######################################
+    - name: deploy-model
+      resource: #indicates that this is a resource template
+        action: apply #can be any kubectl action (e.g. create, delete, apply, patch)
+        manifest: | #put your kubernetes spec here
+        apiVersion: "machinelearning.seldon.io/v1alpha2"
+        kind: "SeldonDeployment"
+        metadata:
+          labels:
+            app: "seldon"
+          name: "docker-hub-classifier"
+          namespace: kubeflow
+        spec:
+          annotations:
+            deployment_version: "v1"
+            project_name: "Docker Hub ML Project"
+          name: "docker-hub-classifier"
+          predictors:
+            - annotations:
+                predictor_version: "v1"
+              componentSpec:
+                spec:
+                  containers:
+                    - image: "{{workflow.parameters.registry}}dev/dockerhubclassifier:{{workflow.parameters.model-version}}"
+                      imagePullPolicy: "Always"
+                      name: "docker-hub-classifier"
+                      volumeMounts: []
+                  terminationGracePeriodSeconds: 1
+                  volumes: []
+              graph:
+                children: []
+                endpoint:
+                  type: "REST"
+                name: "docker-hub-classification-model-serving-{{workflow.parameters.model-version}}"
+                type: "MODEL"
+              name: "docker-hub-classification-model-serving-{{workflow.parameters.model-version}}"
+              replicas: "{{workflow.parameters.replicas}}"
