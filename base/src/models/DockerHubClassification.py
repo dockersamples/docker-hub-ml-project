@@ -31,6 +31,7 @@ class DockerHubClassification(object):
         for c in range(len(self.selected_categories)):
             if preds[0][c] == 1:
                 labels.append(self.selected_categories[c])
+        return labels
 
     def predict(self, text, features_names):
         return np.array([self._predict_labels(text)])

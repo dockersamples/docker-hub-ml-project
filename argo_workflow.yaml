@@ -20,19 +20,23 @@ spec:
     parameters:
       # model version
       - name: model-version
-        value: "v3"
-
-      # number of replicas
-      - name: replicas
-        value: 3
+        value: "v1"
 
       # The name of the S3 bucket where the data is stored.
       - name: bucket
         value: "<bucket-name>"
 
+      # Docker registry username
+      - name: username
+        value: "dev"
+
       # The path to the input data in the S3 bucket, in csv.gz format
-      - name: bucket-key
-        value: <key-path>
+      - name: input-data-key
+        value: <input-data-key-path>
+
+      # The path to the docker cert path in the S3 bucket (e.g. Docker UCP bundle)
+      - name: docker-cert-key
+        value: <docker-cert-key-path>
 
       # mount path
       - name: mount-path
@@ -84,7 +88,7 @@ spec:
 
       #The container image to use in the workflow
       - name: registry
-        value: "<registry-url>"
+        value: ""
 
       #The container image to use in the workflow
       - name: image-name
@@ -109,33 +113,44 @@ spec:
 
     #################################################
     # Import / Unzip
-    # Imports the data on the volume and unzips it.
+    # Imports the input data & docker certs and unpack them.
     #################################################
     - name: import-data
       container:
         image: alpine:latest
         command: [sh, -c]
-        args:
-          [
-            "gzip -d {{workflow.parameters.mount-path}}/hub_stackshare_combined_v2.csv.gz",
+        args: [
+            "gzip -d {{workflow.parameters.mount-path}}/hub_stackshare_combined_v2.csv.gz", #mkdir {{workflow.parameters.mount-path}}/docker-cert-bundle; unzip {{workflow.parameters.mount-path}}/docker-cert-bundle.zip -d {{workflow.parameters.mount-path}}/docker-cert-bundle",
           ]
         volumeMounts:
           - name: workdir
             mountPath: "{{workflow.parameters.mount-path}}/"
       inputs:
         artifacts:
-          - name: input
+          - name: data
             path: "{{workflow.parameters.mount-path}}/hub_stackshare_combined_v2.csv.gz"
             s3:
               endpoint: s3.amazonaws.com
               bucket: "{{workflow.parameters.bucket}}"
-              key: "{{workflow.parameters.bucket-key}}"
+              key: "{{workflow.parameters.input-data-key}}"
               accessKeySecret:
                 name: s3-credentials
                 key: accessKey
               secretKeySecret:
                 name: s3-credentials
                 key: secretKey
+          # - name: docker-cert-bundle
+          #   path: "{{workflow.parameters.mount-path}}/docker-cert-bundle.zip"
+          #   s3:
+          #     endpoint: s3.amazonaws.com
+          #     bucket: "{{workflow.parameters.bucket}}"
+          #     key: "{{workflow.parameters.docker-cert-key}}"
+          #     accessKeySecret:
+          #       name: s3-credentials
+          #       key: accessKey
+          #     secretKeySecret:
+          #       name: s3-credentials
+          #       key: secretKey
       outputs:
         artifacts:
           - name: raw-csv
@@ -147,6 +162,7 @@ spec:
     - name: process-data
       container:
         image: "{{workflow.parameters.registry}}{{workflow.parameters.image-name}}"
+        imagePullPolicy: "IfNotPresent"
         command: [sh, -c]
         args:
           [
@@ -170,6 +186,7 @@ spec:
     - name: training
       container:
         image: "{{workflow.parameters.registry}}{{workflow.parameters.image-name}}"
+        imagePullPolicy: "IfNotPresent"
         command: [sh, -c]
         args:
           [
@@ -194,24 +211,24 @@ spec:
         command: [sh, -c]
         args:
           [
-            "export DOCKER_HOST=tcp://127.0.0.1:2375;cd {{workflow.parameters.mount-path}};sleep 15;rm *.csv;docker run -v {{workflow.parameters.mount-path}}:/model seldonio/core-python-wrapper:0.7 /model DockerHubClassification {{workflow.parameters.model-version}} {{workflow.parameters.registry}}dev --base-image=python:3.6 --image-name=dockerhubclassifier;cd build/;./build_image.sh;./push_image.sh;",
+            "cd {{workflow.parameters.mount-path}};sleep 15;rm *.csv;docker run -v {{workflow.parameters.mount-path}}:/model seldonio/core-python-wrapper:0.7 /model DockerHubClassification {{workflow.parameters.model-version}} {{workflow.parameters.registry}}{{workflow.parameters.username}} --base-image=python:3.6 --image-name=dockerhubclassifier;cd build/;./build_image.sh;echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin;./push_image.sh;",
           ]
         volumeMounts:
           - name: workdir
             mountPath: "{{workflow.parameters.mount-path}}/"
-      env:
-        - name: DOCKER_HOST #the docker daemon can be access on the standard port on localhost
-          value: 127.0.0.1
-        - name: DOCKER_USERNAME # name of env var
-          valueFrom:
-            secretKeyRef:
-              name: docker-credentials # name of an existing k8s secret
-              key: username # 'key' subcomponent of the secret
-        - name: DOCKER_PASSWORD # name of env var
-          valueFrom:
-            secretKeyRef:
-              name: docker-credentials # name of an existing k8s secret
-              key: password # 'key' subcomponent of the secret
+        env:
+          - name: DOCKER_HOST #the docker daemon can be access on the standard port on localhost
+            value: 127.0.0.1
+          - name: DOCKER_USERNAME # name of env var
+            valueFrom:
+              secretKeyRef:
+                name: docker-credentials # name of an existing k8s secret
+                key: username # 'key' subcomponent of the secret
+          - name: DOCKER_PASSWORD # name of env var
+            valueFrom:
+              secretKeyRef:
+                name: docker-credentials # name of an existing k8s secret
+                key: password # 'key' subcomponent of the secret
       sidecars:
         - name: dind
           image: docker:17.10-dind #Docker already provides an image for running a Docker daemon
@@ -229,36 +246,34 @@ spec:
     - name: deploy-model
       resource: #indicates that this is a resource template
         action: apply #can be any kubectl action (e.g. create, delete, apply, patch)
-        manifest: | #put your kubernetes spec here
-        apiVersion: "machinelearning.seldon.io/v1alpha2"
-        kind: "SeldonDeployment"
-        metadata:
-          labels:
-            app: "seldon"
-          name: "docker-hub-classifier"
-          namespace: kubeflow
-        spec:
-          annotations:
-            deployment_version: "v1"
-            project_name: "Docker Hub ML Project"
-          name: "docker-hub-classifier"
-          predictors:
-            - annotations:
-                predictor_version: "v1"
-              componentSpec:
-                spec:
-                  containers:
-                    - image: "{{workflow.parameters.registry}}dev/dockerhubclassifier:{{workflow.parameters.model-version}}"
-                      imagePullPolicy: "Always"
-                      name: "docker-hub-classifier"
-                      volumeMounts: []
-                  terminationGracePeriodSeconds: 1
-                  volumes: []
-              graph:
-                children: []
-                endpoint:
-                  type: "REST"
+        #successCondition: ?
+        manifest: |
+          apiVersion: "machinelearning.seldon.io/v1alpha2"
+          kind: "SeldonDeployment"
+          metadata:
+            labels:
+              app: "seldon"
+            name: "docker-hub-classification-model-serving-{{workflow.parameters.model-version}}"
+            namespace: kubeflow
+          spec:
+            annotations:
+              deployment_version: "{{workflow.parameters.model-version}}"
+              project_name: "Docker Hub ML Project"
+            name: "docker-hub-classifier"
+            predictors:
+              - annotations:
+                  predictor_version: "{{workflow.parameters.model-version}}"
+                componentSpecs:
+                  - spec:
+                      containers:
+                        - image: "{{workflow.parameters.registry}}{{workflow.parameters.username}}/dockerhubclassifier:{{workflow.parameters.model-version}}"
+                          imagePullPolicy: "Always"
+                          name: "docker-hub-classification-model-serving-{{workflow.parameters.model-version}}"
+                graph:
+                  children: []
+                  endpoint:
+                    type: "REST"
+                  name: "docker-hub-classification-model-serving-{{workflow.parameters.model-version}}"
+                  type: "MODEL"
                 name: "docker-hub-classification-model-serving-{{workflow.parameters.model-version}}"
-                type: "MODEL"
-              name: "docker-hub-classification-model-serving-{{workflow.parameters.model-version}}"
-              replicas: "{{workflow.parameters.replicas}}"
+                replicas: 3
